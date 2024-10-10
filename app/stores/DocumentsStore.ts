@@ -21,7 +21,7 @@ import env from "~/env";
 import type {
   FetchOptions,
   PaginationParams,
-  PartialWithId,
+  PartialExcept,
   SearchResult,
 } from "~/types";
 import { client } from "~/utils/ApiClient";
@@ -118,6 +118,33 @@ export default class DocumentsStore extends Store<Document> {
     return filter(
       this.all,
       (document) => document.collectionId === collectionId
+    );
+  }
+
+  archivedInCollection(
+    collectionId: string,
+    options?: { archivedAt: string }
+  ): Document[] {
+    const filterCond = (document: Document) =>
+      options
+        ? document.collectionId === collectionId &&
+          document.isArchived &&
+          document.archivedAt === options.archivedAt &&
+          !document.isDeleted
+        : document.collectionId === collectionId &&
+          document.isArchived &&
+          !document.isDeleted;
+
+    return filter(this.orderedData, filterCond);
+  }
+
+  unarchivedInCollection(collectionId: string): Document[] {
+    return filter(
+      this.orderedData,
+      (document) =>
+        document.collectionId === collectionId &&
+        !document.isArchived &&
+        !document.isDeleted
     );
   }
 
@@ -313,8 +340,18 @@ export default class DocumentsStore extends Store<Document> {
   };
 
   @action
-  fetchArchived = async (options?: PaginationParams): Promise<Document[]> =>
-    this.fetchNamedPage("archived", options);
+  fetchArchived = async (options?: PaginationParams): Promise<Document[]> => {
+    const archivedInResponse = await this.fetchNamedPage("archived", options);
+    const archivedInMemory = this.archived;
+
+    archivedInMemory.forEach((docInMemory) => {
+      !archivedInResponse.find(
+        (docInResponse) => docInResponse.id === docInMemory.id
+      ) && this.remove(docInMemory.id);
+    });
+
+    return archivedInResponse;
+  };
 
   @action
   fetchDeleted = async (options?: PaginationParams): Promise<Document[]> =>
@@ -367,8 +404,8 @@ export default class DocumentsStore extends Store<Document> {
     this.fetchNamedPage("starred", options);
 
   @action
-  fetchDrafts = (options?: PaginationParams): Promise<Document[]> =>
-    this.fetchNamedPage("drafts", options);
+  fetchDrafts = (options: PaginationParams = {}): Promise<Document[]> =>
+    this.fetchNamedPage("drafts", { limit: 100, ...options });
 
   @action
   fetchOwned = (options?: PaginationParams): Promise<Document[]> =>
@@ -489,7 +526,7 @@ export default class DocumentsStore extends Store<Document> {
     super.fetch(
       id,
       options,
-      (res: { data: { document: PartialWithId<Document> } }) =>
+      (res: { data: { document: PartialExcept<Document, "id"> } }) =>
         res.data.document
     );
 
@@ -584,7 +621,6 @@ export default class DocumentsStore extends Store<Document> {
       });
       invariant(res?.data, "Data not available");
       res.data.documents.forEach(this.add);
-      res.data.collections.forEach(this.rootStore.collections.add);
       this.addPolicies(res.policies);
     } finally {
       this.movingDocumentId = undefined;

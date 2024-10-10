@@ -12,10 +12,11 @@ import Document from "~/models/Document";
 import GroupMembership from "~/models/GroupMembership";
 import Star from "~/models/Star";
 import UserMembership from "~/models/UserMembership";
+import ConfirmMoveDialog from "~/components/ConfirmMoveDialog";
 import Icon from "~/components/Icon";
 import useCurrentUser from "~/hooks/useCurrentUser";
 import useStores from "~/hooks/useStores";
-import { DragObject } from "./SidebarLink";
+import { DragObject } from "../components/SidebarLink";
 import { useSidebarLabelAndIcon } from "./useSidebarLabelAndIcon";
 
 /**
@@ -148,6 +149,7 @@ export function useDragDocument(
         icon: icon ? <Icon value={icon} color={color} /> : undefined,
         collectionId: document?.collectionId || "",
       } as DragObject),
+    canDrag: () => !!document?.isActive,
     collect: (monitor) => ({
       isDragging: monitor.isDragging(),
     }),
@@ -158,6 +160,121 @@ export function useDragDocument(
   }, [preview]);
 
   return [{ isDragging }, draggableRef] as const;
+}
+
+/**
+ * Hook for shared logic that allows dropping documents to reparent
+ *
+ * @param node The NavigationNode model to drop.
+ * @param setExpanded A function to expand the parent node.
+ * @param parentRef A ref to the parent element that will be used to detect when the user is no longer hovering..
+ */
+export function useDropToReparentDocument(
+  node: NavigationNode | undefined,
+  setExpanded: () => void,
+  parentRef: React.RefObject<HTMLDivElement>
+) {
+  const { t } = useTranslation();
+  const { documents, collections, dialogs, policies } = useStores();
+  const hasChildDocuments = !!node?.children.length;
+  const document = node ? documents.get(node.id) : undefined;
+  const pathToNode = React.useMemo(
+    () => document?.pathTo.map((item) => item.id),
+    [document]
+  );
+
+  const hoverExpanding = React.useRef<ReturnType<typeof setTimeout>>();
+
+  // We set a timeout when the user first starts hovering over the document link,
+  // to trigger expansion of children. Clear this timeout when they stop hovering.
+  React.useEffect(() => {
+    const resetHoverExpanding = () => {
+      if (hoverExpanding.current) {
+        clearTimeout(hoverExpanding.current);
+        hoverExpanding.current = undefined;
+      }
+    };
+
+    const element = parentRef.current;
+    element?.addEventListener("dragleave", resetHoverExpanding);
+
+    return () => {
+      element?.removeEventListener("dragleave", resetHoverExpanding);
+    };
+  }, [parentRef]);
+
+  return useDrop<
+    DragObject,
+    Promise<void>,
+    { isOverReparent: boolean; canDropToReparent: boolean }
+  >({
+    accept: "document",
+    drop: async (item, monitor) => {
+      if (monitor.didDrop() || !node) {
+        return;
+      }
+
+      const collection = documents.get(node.id)?.collection;
+      const prevCollection = collections.get(item.collectionId);
+
+      if (
+        collection &&
+        prevCollection &&
+        prevCollection.permission !== collection.permission
+      ) {
+        dialogs.openModal({
+          title: t("Change permissions?"),
+          content: (
+            <ConfirmMoveDialog
+              item={item}
+              collection={collection}
+              parentDocumentId={node.id}
+            />
+          ),
+        });
+      } else {
+        await documents.move({
+          documentId: item.id,
+          parentDocumentId: node.id,
+        });
+      }
+
+      setExpanded();
+    },
+    canDrop: (item, monitor) =>
+      !!node &&
+      !!pathToNode &&
+      !pathToNode.includes(monitor.getItem().id) &&
+      item.id !== node.id &&
+      !!document?.isActive &&
+      policies.abilities(node.id).update &&
+      policies.abilities(item.id).move,
+    hover: (_item, monitor) => {
+      // Enables expansion of document children when hovering over the document
+      // for more than half a second.
+      if (
+        hasChildDocuments &&
+        monitor.canDrop() &&
+        monitor.isOver({
+          shallow: true,
+        })
+      ) {
+        if (!hoverExpanding.current) {
+          hoverExpanding.current = setTimeout(() => {
+            hoverExpanding.current = undefined;
+
+            if (monitor.isOver({ shallow: true })) {
+              setExpanded();
+            }
+          }, 500);
+        }
+      }
+    },
+    collect: (monitor) => ({
+      isOverReparent: monitor.isOver({ shallow: true }),
+      canDropToReparent: monitor.canDrop(),
+    }),
+  });
 }
 
 /**
@@ -180,7 +297,9 @@ export function useDropToReorderDocument(
       }
 ) {
   const { t } = useTranslation();
-  const { documents, policies } = useStores();
+  const { documents, collections, dialogs, policies } = useStores();
+
+  const document = documents.get(node.id);
 
   return useDrop<
     DragObject,
@@ -189,11 +308,23 @@ export function useDropToReorderDocument(
   >({
     accept: "document",
     canDrop: (item: DragObject) => {
-      if (item.id === node.id) {
+      if (
+        item.id === node.id ||
+        !policies.abilities(item.id)?.move ||
+        !document?.isActive
+      ) {
         return false;
       }
 
-      return policies.abilities(item.id)?.move;
+      const params = getMoveParams(item);
+      if (params?.collectionId) {
+        return policies.abilities(params.collectionId)?.updateDocument;
+      }
+      if (params?.parentDocumentId) {
+        return policies.abilities(params.parentDocumentId)?.update;
+      }
+
+      return true;
     },
     drop: async (item) => {
       if (!collection?.isManualSort && item.collectionId === collection?.id) {
@@ -206,8 +337,28 @@ export function useDropToReorderDocument(
       }
 
       const params = getMoveParams(item);
+
       if (params) {
-        void documents.move(params);
+        const prevCollection = collections.get(item.collectionId);
+
+        if (
+          collection &&
+          prevCollection &&
+          prevCollection.permission !== collection.permission
+        ) {
+          dialogs.openModal({
+            title: t("Change permissions?"),
+            content: (
+              <ConfirmMoveDialog
+                item={item}
+                collection={collection}
+                {...params}
+              />
+            ),
+          });
+        } else {
+          void documents.move(params);
+        }
       }
     },
     collect: (monitor) => ({
@@ -281,6 +432,47 @@ export function useDropToReorderUserMembership(getIndex?: () => string) {
     collect: (monitor) => ({
       isOverCursor: !!monitor.isOver(),
       isDragging: monitor.getItemType() === "userMembership",
+    }),
+  });
+}
+
+/**
+ * Hook for shared logic that allows dropping documents and collections onto archive section
+ */
+export function useDropToArchive() {
+  const accept = ["document", "collection"];
+  const { documents, collections, policies } = useStores();
+  const { t } = useTranslation();
+
+  return useDrop<
+    DragObject,
+    Promise<void>,
+    { isOverArchiveSection: boolean; isDragging: boolean }
+  >({
+    accept,
+    drop: async (item, monitor) => {
+      const type = monitor.getItemType();
+      let model;
+
+      if (type === "collection") {
+        model = collections.get(item.id);
+      } else {
+        model = documents.get(item.id);
+      }
+
+      if (model) {
+        await model.archive();
+        toast.success(
+          type === "collection"
+            ? t("Collection archived")
+            : t("Document archived")
+        );
+      }
+    },
+    canDrop: (item) => policies.abilities(item.id).archive,
+    collect: (monitor) => ({
+      isOverArchiveSection: !!monitor.isOver(),
+      isDragging: monitor.canDrop(),
     }),
   });
 }
