@@ -13,9 +13,9 @@ import {
   Transaction,
   Op,
   FindOptions,
-  ScopeOptions,
   WhereOptions,
   EmptyResultError,
+  Sequelize,
 } from "sequelize";
 import {
   ForeignKey,
@@ -72,12 +72,20 @@ import Length from "./validators/Length";
 
 export const DOCUMENT_VERSION = 2;
 
+// If content (JSON) is null then we still need to return the state column (BINARY)
+// as it's used as a fallback for content deserialization for older documents.
+// This can be removed if content is 100% backfilled.
+const stateIfContentEmpty = Sequelize.literal(
+  `CASE WHEN document.content IS NULL THEN document.state ELSE NULL END AS state`
+);
+
 type AdditionalFindOptions = {
   userId?: string;
   includeState?: boolean;
   rejectOnEmpty?: boolean | Error;
 };
 
+// @ts-expect-error Type 'Literal' is not assignable to type 'string | ProjectionAlias'.
 @DefaultScope(() => ({
   include: [
     {
@@ -102,27 +110,14 @@ type AdditionalFindOptions = {
     },
   },
   attributes: {
-    exclude: ["state"],
+    include: [stateIfContentEmpty],
   },
 }))
+// @ts-expect-error Type 'Literal' is not assignable to type 'string | ProjectionAlias'.
 @Scopes(() => ({
-  withCollectionPermissions: (userId: string, paranoid = true) => ({
-    include: [
-      {
-        attributes: ["id", "permission", "sharing", "teamId", "deletedAt"],
-        model: userId
-          ? Collection.scope({
-              method: ["withMembership", userId],
-            })
-          : Collection,
-        as: "collection",
-        paranoid,
-      },
-    ],
-  }),
   withoutState: {
     attributes: {
-      exclude: ["state"],
+      include: [stateIfContentEmpty],
     },
   },
   withCollection: {
@@ -136,7 +131,7 @@ type AdditionalFindOptions = {
   withState: {
     attributes: {
       // resets to include the state column
-      exclude: [],
+      include: [],
     },
   },
   withDrafts: {
@@ -169,13 +164,25 @@ type AdditionalFindOptions = {
       ],
     };
   },
-  withMembership: (userId: string) => {
+  withMembership: (userId: string, paranoid = true) => {
     if (!userId) {
       return {};
     }
 
     return {
       include: [
+        {
+          model: userId
+            ? Collection.scope([
+                "defaultScope",
+                {
+                  method: ["withMembership", userId],
+                },
+              ])
+            : Collection,
+          as: "collection",
+          paranoid,
+        },
         {
           association: "memberships",
           where: {
@@ -420,6 +427,7 @@ class Document extends ArchivableModel<
     }
 
     const collection = await Collection.findByPk(model.collectionId, {
+      includeDocumentStructure: true,
       transaction,
       lock: Transaction.LOCK.UPDATE,
     });
@@ -444,6 +452,7 @@ class Document extends ArchivableModel<
 
     return this.sequelize!.transaction(async (transaction: Transaction) => {
       const collection = await Collection.findByPk(model.collectionId!, {
+        includeDocumentStructure: true,
         transaction,
         lock: transaction.LOCK.UPDATE,
       });
@@ -637,30 +646,29 @@ class Document extends ArchivableModel<
     return uniq(membershipUserIds);
   }
 
-  static defaultScopeWithUser(userId: string) {
-    const collectionScope: Readonly<ScopeOptions> = {
-      method: ["withCollectionPermissions", userId],
-    };
-    const viewScope: Readonly<ScopeOptions> = {
-      method: ["withViews", userId],
-    };
-    const membershipScope: Readonly<ScopeOptions> = {
-      method: ["withMembership", userId],
-    };
+  static withMembershipScope(
+    userId: string,
+    options?: FindOptions<Document> & { includeDrafts?: boolean }
+  ) {
     return this.scope([
-      "defaultScope",
-      collectionScope,
-      viewScope,
-      membershipScope,
+      options?.includeDrafts ? "withDrafts" : "defaultScope",
+      "withoutState",
+      {
+        method: ["withViews", userId],
+      },
+      {
+        method: ["withMembership", userId, options?.paranoid],
+      },
     ]);
   }
 
   /**
    * Overrides the standard findByPk behavior to allow also querying by urlId
+   * and loading memberships for a user passed in by `userId`
    *
    * @param id uuid or urlId
    * @param options FindOptions
-   * @returns A promise resolving to a collection instance or null
+   * @returns A promise resolving to a document instance or null
    */
   static async findByPk(
     id: Identifier,
@@ -685,14 +693,12 @@ class Document extends ArchivableModel<
     // almost every endpoint needs the collection membership to determine policy permissions.
     const scope = this.scope([
       "withDrafts",
-      {
-        method: ["withCollectionPermissions", userId, rest.paranoid],
-      },
+      includeState ? "withState" : "withoutState",
       {
         method: ["withViews", userId],
       },
       {
-        method: ["withMembership", userId],
+        method: ["withMembership", userId, rest.paranoid],
       },
     ]);
 
@@ -750,9 +756,6 @@ class Document extends ArchivableModel<
     const user = userId ? await User.findByPk(userId) : null;
     const documents = await this.scope([
       "withDrafts",
-      {
-        method: ["withCollectionPermissions", userId, rest.paranoid],
-      },
       {
         method: ["withViews", userId],
       },
@@ -939,6 +942,7 @@ class Document extends ArchivableModel<
 
     if (!this.template && this.collectionId) {
       const collection = await Collection.findByPk(this.collectionId, {
+        includeDocumentStructure: true,
         transaction,
         lock: Transaction.LOCK.UPDATE,
       });
@@ -1006,6 +1010,7 @@ class Document extends ArchivableModel<
     await this.sequelize.transaction(async (transaction: Transaction) => {
       const collection = this.collectionId
         ? await Collection.findByPk(this.collectionId, {
+            includeDocumentStructure: true,
             transaction,
             lock: transaction.LOCK.UPDATE,
           })
@@ -1040,6 +1045,7 @@ class Document extends ArchivableModel<
     const { transaction } = { ...options };
     const collection = this.collectionId
       ? await Collection.findByPk(this.collectionId, {
+          includeDocumentStructure: true,
           transaction,
           lock: transaction?.LOCK.UPDATE,
         })
@@ -1064,6 +1070,7 @@ class Document extends ArchivableModel<
     const { transaction } = { ...options };
     const collection = collectionId
       ? await Collection.findByPk(collectionId, {
+          includeDocumentStructure: true,
           transaction,
           lock: transaction?.LOCK.UPDATE,
         })
@@ -1116,6 +1123,7 @@ class Document extends ArchivableModel<
 
       if (!this.template && this.collectionId) {
         const collection = await Collection.findByPk(this.collectionId!, {
+          includeDocumentStructure: true,
           transaction,
           lock: transaction.LOCK.UPDATE,
           paranoid: false,
