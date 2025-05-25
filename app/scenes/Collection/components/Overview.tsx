@@ -1,20 +1,23 @@
 import debounce from "lodash/debounce";
 import { observer } from "mobx-react";
-import * as React from "react";
+import { useMemo, useRef, useCallback, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import styled from "styled-components";
 import { richExtensions } from "@shared/editor/nodes";
 import { s } from "@shared/styles";
+import { ProsemirrorHelper } from "@shared/utils/ProsemirrorHelper";
 import { CollectionValidation } from "@shared/validations";
 import Collection from "~/models/Collection";
+import Document from "~/models/Document";
 import Editor from "~/components/Editor";
 import LoadingIndicator from "~/components/LoadingIndicator";
+import Text from "~/components/Text";
 import { withUIExtensions } from "~/editor/extensions";
 import useCurrentUser from "~/hooks/useCurrentUser";
 import usePolicy from "~/hooks/usePolicy";
 import useStores from "~/hooks/useStores";
-import Text from "./Text";
+import { Properties } from "~/types";
 
 const extensions = withUIExtensions(richExtensions);
 
@@ -22,13 +25,13 @@ type Props = {
   collection: Collection;
 };
 
-function CollectionDescription({ collection }: Props) {
-  const { collections } = useStores();
+function Overview({ collection }: Props) {
+  const { documents, collections } = useStores();
   const { t } = useTranslation();
   const user = useCurrentUser({ rejectOnEmpty: true });
   const can = usePolicy(collection);
 
-  const handleSave = React.useMemo(
+  const handleSave = useMemo(
     () =>
       debounce(async (getValue) => {
         try {
@@ -43,9 +46,9 @@ function CollectionDescription({ collection }: Props) {
     [collection, t]
   );
 
-  const childRef = React.useRef<HTMLDivElement>(null);
+  const childRef = useRef<HTMLDivElement>(null);
   const childOffsetHeight = childRef.current?.offsetHeight || 0;
-  const editorStyle = React.useMemo(
+  const editorStyle = useMemo(
     () => ({
       padding: "0 32px",
       margin: "0 -32px",
@@ -54,24 +57,43 @@ function CollectionDescription({ collection }: Props) {
     [childOffsetHeight]
   );
 
+  const onCreateLink = useCallback(
+    async (params: Properties<Document>) => {
+      const newDocument = await documents.create(
+        {
+          collectionId: collection.id,
+          data: ProsemirrorHelper.getEmptyDocument(),
+          ...params,
+        },
+        {
+          publish: true,
+        }
+      );
+
+      return newDocument.url;
+    },
+    [collection, documents]
+  );
+
   return (
     <>
       {collections.isSaving && <LoadingIndicator />}
       {(collection.hasDescription || can.update) && (
-        <React.Suspense fallback={<Placeholder>Loading…</Placeholder>}>
+        <Suspense fallback={<Placeholder>Loading…</Placeholder>}>
           <Editor
             defaultValue={collection.data}
             onChange={handleSave}
             placeholder={`${t("Add a description")}…`}
             extensions={extensions}
             maxLength={CollectionValidation.maxDescriptionLength}
+            onCreateLink={onCreateLink}
             canUpdate={can.update}
             readOnly={!can.update}
             userId={user.id}
             editorStyle={editorStyle}
           />
           <div ref={childRef} />
-        </React.Suspense>
+        </Suspense>
       )}
     </>
   );
@@ -83,4 +105,4 @@ const Placeholder = styled(Text)`
   min-height: 27px;
 `;
 
-export default observer(CollectionDescription);
+export default observer(Overview);

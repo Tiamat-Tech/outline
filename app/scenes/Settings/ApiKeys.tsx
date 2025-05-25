@@ -1,6 +1,5 @@
 import { observer } from "mobx-react";
 import { CodeIcon } from "outline-icons";
-import * as React from "react";
 import { useTranslation, Trans } from "react-i18next";
 import ApiKey from "~/models/ApiKey";
 import { Action } from "~/components/Actions";
@@ -61,7 +60,6 @@ function ApiKeys() {
       <PaginatedList<ApiKey>
         fetch={apiKeys.fetchPage}
         items={apiKeys.orderedData}
-        heading={<h2>{t("All")}</h2>}
         renderItem={(apiKey) => (
           <ApiKeyListItem key={apiKey.id} apiKey={apiKey} />
         )}

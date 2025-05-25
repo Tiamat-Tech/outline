@@ -1,7 +1,7 @@
 import { observer } from "mobx-react";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { MenuButton, useMenuState } from "reakit/Menu";
+import { MenuButton } from "reakit/Menu";
 import ContextMenu from "~/components/ContextMenu";
 import Template from "~/components/ContextMenu/Template";
 import {
@@ -10,10 +10,11 @@ import {
 } from "~/actions/definitions/navigation";
 import {
   createTeam,
-  createTeamsList,
+  switchTeamsList,
   desktopLoginTeam,
 } from "~/actions/definitions/teams";
 import useActionContext from "~/hooks/useActionContext";
+import { useMenuState } from "~/hooks/useMenuState";
 import usePrevious from "~/hooks/usePrevious";
 import useStores from "~/hooks/useStores";
 import separator from "~/menus/separator";
@@ -22,7 +23,7 @@ type Props = {
   children?: React.ReactNode;
 };
 
-const OrganizationMenu: React.FC = ({ children }: Props) => {
+const TeamMenu: React.FC = ({ children }: Props) => {
   const menu = useMenuState({
     unstable_offset: [4, -4],
     placement: "bottom-start",
@@ -44,7 +45,7 @@ const OrganizationMenu: React.FC = ({ children }: Props) => {
   // menu is not cached at all.
   const actions = React.useMemo(
     () => [
-      ...createTeamsList(context),
+      ...switchTeamsList(context),
       createTeam,
       desktopLoginTeam,
       separator(),
@@ -64,4 +65,4 @@ const OrganizationMenu: React.FC = ({ children }: Props) => {
   );
 };
 
-export default observer(OrganizationMenu);
+export default observer(TeamMenu);

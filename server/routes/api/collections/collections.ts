@@ -1,4 +1,3 @@
-import invariant from "invariant";
 import Router from "koa-router";
 import { Sequelize, Op, WhereOptions } from "sequelize";
 import {
@@ -39,6 +38,7 @@ import {
   presentFileOperation,
 } from "@server/presenters";
 import { APIContext } from "@server/types";
+import { CacheHelper } from "@server/utils/CacheHelper";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import { collectionIndexing } from "@server/utils/indexing";
 import pagination from "../middlewares/pagination";
@@ -63,6 +63,7 @@ router.post(
       icon,
       sort,
       index,
+      commenting,
     } = ctx.input.body;
 
     const { user } = ctx.state.auth;
@@ -80,6 +81,7 @@ router.post(
       sharing,
       sort,
       index,
+      commenting,
     });
 
     if (data) {
@@ -96,12 +98,11 @@ router.post(
       },
     });
     // we must reload the collection to get memberships for policy presenter
-    const reloaded = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(collection.id, {
+    const reloaded = await Collection.findByPk(collection.id, {
+      userId: user.id,
       transaction,
+      rejectOnEmpty: true,
     });
-    invariant(reloaded, "collection not found");
 
     ctx.body = {
       data: await presentCollection(ctx, reloaded),
@@ -118,11 +119,14 @@ router.post(
     const { id } = ctx.input.body;
     const { user } = ctx.state.auth;
     const collection = await Collection.scope([
+      "defaultScope",
+      "withArchivedBy",
       {
         method: ["withMembership", user.id],
       },
-      "withArchivedBy",
-    ]).findByPk(id);
+    ]).findOne({
+      where: { id },
+    });
 
     authorize(user, "read", collection);
 
@@ -140,14 +144,27 @@ router.post(
   async (ctx: APIContext<T.CollectionsDocumentsReq>) => {
     const { id } = ctx.input.body;
     const { user } = ctx.state.auth;
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id);
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
+    });
 
     authorize(user, "readDocument", collection);
 
+    const documentStructure = await CacheHelper.getDataOrSet(
+      CacheHelper.getCollectionDocumentsKey(collection.id),
+      async () =>
+        (
+          await Collection.findByPk(collection.id, {
+            attributes: ["documentStructure"],
+            includeDocumentStructure: true,
+            rejectOnEmpty: true,
+          })
+        ).documentStructure,
+      60
+    );
+
     ctx.body = {
-      data: collection.documentStructure || [],
+      data: documentStructure || [],
     };
   }
 );
@@ -199,9 +216,7 @@ router.post(
     const { user } = ctx.state.auth;
 
     const [collection, group] = await Promise.all([
-      Collection.scope({
-        method: ["withMembership", user.id],
-      }).findByPk(id, { transaction }),
+      Collection.findByPk(id, { userId: user.id, transaction }),
       Group.findByPk(groupId, { transaction }),
     ]);
     authorize(user, "update", collection);
@@ -246,9 +261,8 @@ router.post(
     const { transaction } = ctx.state;
 
     const [collection, group] = await Promise.all([
-      Collection.scope({
-        method: ["withMembership", user.id],
-      }).findByPk(id, {
+      Collection.findByPk(id, {
+        userId: user.id,
         transaction,
       }),
       Group.findByPk(groupId, {
@@ -284,9 +298,9 @@ router.post(
     const { id, query, permission } = ctx.input.body;
     const { user } = ctx.state.auth;
 
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id);
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
+    });
     authorize(user, "read", collection);
 
     let where: WhereOptions<GroupMembership> = {
@@ -354,9 +368,7 @@ router.post(
     const { id, userId, permission } = ctx.input.body;
 
     const [collection, user] = await Promise.all([
-      Collection.scope({
-        method: ["withMembership", actor.id],
-      }).findByPk(id, { transaction }),
+      Collection.findByPk(id, { userId, transaction }),
       User.findByPk(userId, { transaction }),
     ]);
     authorize(actor, "update", collection);
@@ -400,9 +412,7 @@ router.post(
     const { id, userId } = ctx.input.body;
 
     const [collection, user] = await Promise.all([
-      Collection.scope({
-        method: ["withMembership", actor.id],
-      }).findByPk(id, { transaction }),
+      Collection.findByPk(id, { userId, transaction }),
       User.findByPk(userId, { transaction }),
     ]);
     authorize(actor, "update", collection);
@@ -433,9 +443,9 @@ router.post(
     const { id, query, permission } = ctx.input.body;
     const { user } = ctx.state.auth;
 
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id);
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
+    });
     authorize(user, "read", collection);
 
     let where: WhereOptions<UserMembership> = {
@@ -501,9 +511,10 @@ router.post(
     const team = await Team.findByPk(user.teamId, { transaction });
     authorize(user, "createExport", team);
 
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id, { transaction });
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
+      transaction,
+    });
     authorize(user, "export", collection);
 
     const fileOperation = await collectionExporter({
@@ -571,12 +582,12 @@ router.post(
       color,
       sort,
       sharing,
+      commenting,
     } = ctx.input.body;
 
     const { user } = ctx.state.auth;
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id, {
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
       transaction,
     });
     authorize(user, "update", collection);
@@ -640,6 +651,10 @@ router.post(
 
     if (sort !== undefined) {
       collection.sort = sort;
+    }
+
+    if (commenting !== undefined) {
+      collection.commenting = commenting;
     }
 
     await collection.save({ transaction });
@@ -812,9 +827,8 @@ router.post(
     const { id } = ctx.input.body;
     const { user } = ctx.state.auth;
 
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id, {
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
       transaction,
     });
 
@@ -843,11 +857,8 @@ router.post(
     const { id } = ctx.input.body;
     const { user } = ctx.state.auth;
 
-    const collection = await Collection.scope([
-      {
-        method: ["withMembership", user.id],
-      },
-    ]).findByPk(id, {
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
       transaction,
       rejectOnEmpty: true,
     });
@@ -903,11 +914,11 @@ router.post(
     const { id } = ctx.input.body;
     const { user } = ctx.state.auth;
 
-    const collection = await Collection.scope({
-      method: ["withMembership", user.id],
-    }).findByPk(id, {
-      transaction,
+    const collection = await Collection.findByPk(id, {
+      userId: user.id,
+      includeDocumentStructure: true,
       rejectOnEmpty: true,
+      transaction,
     });
 
     authorize(user, "restore", collection);
